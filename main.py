@@ -3,6 +3,7 @@ import dotenv
 import os
 
 from flask import Flask, request, abort ,jsonify
+from flask_cors import CORS
 import json
 
 from linebot import (
@@ -44,6 +45,7 @@ HOTPEPPRE_API_KEY = os.environ["HOTPEPPRE_API_KEY"]
 
 
 app = Flask(__name__)
+CORS(app)
 
 @app.route("/callback", methods=['POST'])
 def callback():
