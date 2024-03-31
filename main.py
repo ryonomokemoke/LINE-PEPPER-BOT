@@ -2,10 +2,6 @@ from typing import Any
 import dotenv
 import os
 
-from flask import Flask, request, abort ,jsonify
-from flask_cors import CORS
-import json
-
 from linebot import (
     LineBotApi, WebhookHandler
 )
@@ -24,11 +20,6 @@ import datetime # 登録日など日付
 import requests
 from bs4 import BeautifulSoup
 
-### UserTutorialのimport
-from UserTutorial import TutorialMessages
-### SearchQueryのimport
-from SearchQuery import SearchQuery
-
 # カルーセルURIでのエスケープ用
 import urllib.parse
 
@@ -43,67 +34,88 @@ SEARCH_FORM_LIFF = os.environ['SEARCH_FORM_LIFF']
 SHARE_LIFF_BASE_URI = os.environ["SHARE_LIFF_BASE_URI"]
 HOTPEPPRE_API_KEY = os.environ["HOTPEPPRE_API_KEY"]
 
+##################################
+import json
 
-app = Flask(__name__)
-CORS(app)
+from fastapi import FastAPI, Header, Request
+from fastapi.middleware.cors import CORSMiddleware
 
-@app.route("/callback", methods=['POST'])
-def callback():
-    '''
-    Lineサーバーの要求に対してngrokサーバーが返答する。
-    この結果をラインサーバが受け取って、通信できているか見る。
-    '''
-    # get X-Line-Signature header value
-    signature = request.headers['X-Line-Signature']
+from starlette.exceptions import HTTPException
 
-    # get request body as text
-    body = request.get_data(as_text=True)
-    app.logger.info("Request body: " + body)
+app = FastAPI(debug=True)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    # handle webhook body
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        print("Invalid signature. Please check your channel access token/channel secret.")
-        abort(400)
+# DBの初期設定
+DATABASE_PATH = 'Database/sqlite_database.db' # DBのパス
+db.setup_database(DATABASE_PATH)
 
-    return 'OK'
+# 検索対象の記号を設定[記号,False:スペースを削除,True:スペースを文字列に含む]
+QUERY_MARKS = [["/", False], ["+", False], ["¥", False], ["=", True]]
 
-@app.route('/user_query', methods = ['GET'])
-def user_query():
-    """ユーザーの検索条件を返すエンドポイント
+MAX_DISPLAY_SHOP_QUANTITY = 5 # 1回に提案する店舗数の上限
+MAX_HIT_PAGE_STOCK_QUANTITY = 3 # 検索結果のうち、ユーザーが保持できるページ数
 
-    Returns:
-        json : json型で、{date: , place: , budget:, freeword:}を返す。
-    """
-    # クエリパラメータからuser_idを取得
-    user_id = request.args.get('user_id')
-    # user_queriesを取得
-    user_queries = db.get_user_queries(DATABASE_PATH, user_id)[1:5]
-
-    print(user_queries)
-    user_queries_json = jsonify(user_queries)
-    response = json.dumps(user_queries, ensure_ascii=False)
-    # 取得したデータをJSON形式で返す
-    return response
+##################################
 
 
-@app.route('/shop_info', methods = ['GET'])
-def fetch_shop_info():
-    """店舗情報をを返すエンドポイント
+@app.get("/shop_info")
+def shop_info(shop_id):
+    """店舗情報を返すエンドポイント
 
     Returns:
         json : json型で、{}を返す。
     """
-    # クエリパラメータからuser_idを取得
-    shop_id = request.args.get('shop_id')
-    # shop_recordを取得
-    shop_record = db.fetch_shop_record(DATABASE_PATH, shop_id) # jumpppp
+    # shop_record(リスト)を取得     
+    shop_record_as_list = db.fetch_shop_record_as_list(DATABASE_PATH, shop_id)
+    # 取得情報からShopRecordインスタンスを設定
+    shop_record = ShopRecord()
+    shop_record.set_attributes(shop_record_as_list)
+
     # fetchした店舗情報をjson形式にする
     response = shop_record.to_json()
-    print("respons: " + response)
     # レスポンスとしてJSON形式で返す
     return response
+
+# @app.route('/user_query', methods = ['GET'])
+# def user_query():
+#     """ユーザーの検索条件を返すエンドポイント
+
+#     Returns:
+#         json : json型で、{date: , place: , budget:, freeword:}を返す。
+#     """
+#     # クエリパラメータからuser_idを取得
+#     user_id = request.args.get('user_id')
+#     # user_queriesを取得
+#     user_queries = db.get_user_queries(DATABASE_PATH, user_id)[1:5]
+
+#     print(user_queries)
+#     user_queries_json = jsonify(user_queries)
+#     response = json.dumps(user_queries, ensure_ascii=False)
+#     # 取得したデータをJSON形式で返す
+#     return response
+
+@app.post(
+    "/callback",
+    summary="LINE Message APIからのコールバックです。",
+    description="ユーザーからメッセージが送信された際、LINE Message APIからこちらのメソッドが呼び出されます。",
+)
+async def callback(request: Request, x_line_signature=Header(None)):
+
+    body = await request.body()
+
+    try:
+        handler.handle(body.decode("utf-8"), x_line_signature)
+
+    except InvalidSignatureError:
+        raise HTTPException(status_code=400, detail="InvalidSignatureError")
+
+    return "OK"
 
 
 @handler.add(MessageEvent, message=TextMessage)
@@ -137,7 +149,7 @@ def handle_message(event):
 
 
     # 検索条件記号がない場合はtextを無視する。
-    if not SearchQuery.has_query_marks(standardized_message, query_marks):
+    if not SearchQuery.has_query_marks(standardized_message, QUERY_MARKS):
         return
 
     # 新規ユーザーの場合、初期Queryレコードを設定
@@ -146,13 +158,18 @@ def handle_message(event):
         db.add_empty_query_record(DATABASE_PATH, user_id) # 条件NULLのみのQueryレコードを作成。
 
     # 検索条件の更新
-    input_queries = SearchQuery.split_to_each_query_texts(standardized_message, query_marks) # 検索条件をリストで作成　修正　SearchQueryクラスのメソッドにしたい。
+    input_queries = SearchQuery.split_to_each_query_texts(standardized_message, QUERY_MARKS) # 検索条件をリストで作成　修正　SearchQueryクラスのメソッドにしたい。
     input_queries[0] = input_queries[0].replace("-","") # yyyy-mm-dd を yyyymmdd に変更
     print(f'input_queries:{input_queries}')
     db.update_query(DATABASE_PATH, user_id, input_queries) # Queryレコードを更新
 
     # 検索条件からホットペッパー検索URLを生成
     queries = db.get_user_queries(DATABASE_PATH, user_id) # ユーザーの検索条件を取得
+    print(f'queries: {queries[1]}  ')
+    print(f'queries: {queries[2]}  ')
+    print(f'queries: {queries[3]}  ')
+    print(f'queries: {queries[4]}  ')
+
     user_query = SearchQuery.UserQuery(queries) # 検索条件情報を持つインスタンスを作成
     original_search_url = user_query.hotpepper_search_url() # 検索URLを生成
 
@@ -163,8 +180,12 @@ def handle_message(event):
 
     ## 一件も店がヒットしなかった時 # 「店舗としてはヒットするが、情報が入っていない」店が除去できていない(要修正)
     if search_result_urls == None:
-        # 店舗検索がヒットしなかった際のフィードバックメッセージ作成s
-        cannot_introduce_message = create_shop_not_hit_carousel_column(db.get_query_record(DATABASE_PATH, user_id))
+        # 店舗検索がヒットしなかった際のフィードバックメッセージ作成
+        query_record = QueryRecord()
+        query_record_as_list = db.fetch_query_record_as_list(DATABASE_PATH, user_id)
+        query_record.set_attributes(query_record_as_list)
+        cannot_introduce_message = create_shop_not_hit_carousel_column(query_record)
+    
         # ユーザーにメッセージ送信
         line_bot_api.reply_message(event.reply_token, cannot_introduce_message)
         return
@@ -180,29 +201,6 @@ def handle_message(event):
     introduce_shops_by_user_id(event, DATABASE_PATH, user_id)
 
     return
-
-@handler.add(FollowEvent)
-def handle_follow(event):
-    '''
-    Botフォロー時のメッセージ
-    '''
-    # 友達追加時にフレックスメッセージを送信
-    line_bot_api.reply_message(
-        event.reply_token,
-        join_message
-    )
-
-
-@handler.add(JoinEvent)
-def handle_join(event):
-    '''
-    Botをグループに参加させた時のメッセージ
-    '''
-    # グループ追加時にフレックスメッセージを送信
-    line_bot_api.reply_message(
-        event.reply_token,
-        join_message
-    )
 
 
 class QueryMarks:
@@ -244,7 +242,8 @@ class FreewordMark:
 
 
 class ShopCarusel:
-
+    """店舗紹介カルーセルを作成するクラス
+    """
     def __init__(self, shop_record):
         
         # 店舗説明分の作成
@@ -267,13 +266,13 @@ class ShopCarusel:
                 {
                     "type": "uri",
                     "label": "共有する",
-                    "uri": SHARE_LIFF_BASE_URI + "?shop_id=" + shop_record.shop_id
+                    "uri": SHARE_LIFF_BASE_URI + "/shop_info?shop_id=" + shop_record.shop_id
                 }
             ]
         )
 
 
-class ShopRecord: # jumpppp
+class ShopRecord:
     """shop_carousel作成に必要十分な情報を取得するクラス。
     情報元はShopDetail(retrieve)もしくはDB(fetch)。
     """
@@ -287,13 +286,30 @@ class ShopRecord: # jumpppp
         self.review_score = None
         self.review_quantity = None
     
+    def set_attributes(self, shop_record_as_list: list):
+        """リスト型で取得したshop_recordをプロパティとして設定
+
+        Args:
+            shop_record_as_list (list): 下記の順で並ぶshopテーブルのリスト版
+        """
+        self.shop_id = shop_record_as_list[0]
+        self.name = shop_record_as_list[1]
+        self.img_url = shop_record_as_list[2]
+        self.access = shop_record_as_list[3]
+        self.affiliate_url = shop_record_as_list[4]
+        self.review_score = shop_record_as_list[5]
+        self.review_quantity = shop_record_as_list[6]
+
+
     def to_json(self):
         """json形式にして全プロパティを返す
 
         Returns:
             json: 全プロパティ
         """
-        return json.dumps(self.__dict__, ensure_ascii=False)
+        print(self.__dict__)
+        return json.dumps(self.__dict__, ensure_ascii=False).encode("utf-8")
+        # return json.dumps(self.__dict__, ensure_ascii=False).encode('utf-8')
 
     def retrieve_propaties_from_shop_detail(self, shop_detail):
         """ ShopDetailインスタンスから、Shopレコード情報を取得。
@@ -367,6 +383,17 @@ class QueryRecord:
         self.price = None
         self.freeword = None
 
+    def set_attributes(self, query_record_as_list: list):
+        """リスト型で取得したquery_recordをプロパティとして設定
+
+        Args:
+            query_record_as_list (list): 下記の順で並ぶqueryテーブルのリスト版
+        """
+        self.date = query_record_as_list[0]
+        self.place = query_record_as_list[1]
+        self.price = query_record_as_list[2]
+        self.freeword = query_record_as_list[3]
+
     def text_for_carousel(self):
         
         self.date_disp = str(self.date) if self.date else ""
@@ -396,7 +423,9 @@ def introduce_shops_by_user_id(event, DATABASE_PATH: str, user_id: str):
     selected_search_record_ids, selected_shop_ids = db.select_shop(DATABASE_PATH, user_id, MAX_DISPLAY_SHOP_QUANTITY)
 
     # 検索条件の取得
-    query_record = db.get_query_record(DATABASE_PATH, user_id) 
+    query_record_as_list = db.fetch_query_record_as_list(DATABASE_PATH, user_id) 
+    query_record = QueryRecord()
+    query_record.set_attributes(query_record_as_list)
 
     # 紹介するShopRecordリストの取得
     shop_records = create_shop_records(DATABASE_PATH, selected_shop_ids)
@@ -474,7 +503,13 @@ def create_registered_shop_records(DATABASE_PATH: str, registered_shop_ids: list
     if registered_shop_ids:
         for shop_id in registered_shop_ids:
             # DBからShopRecordインスタンスを作成
-            shop_record = db.fetch_shop_record(DATABASE_PATH, shop_id)
+            shop_record_as_list = db.fetch_shop_record_as_list(DATABASE_PATH, shop_id)
+
+            # ShopRecordインスタンス作成 jump
+            shop_record = ShopRecord()
+            # プロパティの更新
+            shop_record.set_attributes(shop_record_as_list)
+
             # ShopRecordリストに追加
             shop_records.append(shop_record)
             # インスタンスの解放
@@ -534,7 +569,7 @@ def create_shop_carousel_columns(shop_records: list) -> list:
         # ShopRecordインスタンスからShopCarouselインスタンス作成
         shop_carousel = ShopCarusel(shop_record)
         # carousel_columnをappend
-        carousel_columns.append(shop_carousel.carousel_column) #jump
+        carousel_columns.append(shop_carousel.carousel_column)
 
     return carousel_columns
 
@@ -727,7 +762,7 @@ def create_has_no_more_shop_message(query_record) -> TemplateSendMessage:
     shop_not_hit_carousel_column = CarouselColumn(
         thumbnail_image_url="https://document.intra-mart.jp/library/rpa/public/im_rpa_usage_guide/_images/winactor_tutorial_5_4_1.png",
         title="もうお店がありません。",
-        text = "条件を変えて検索してみてください！\n" + query_marks.ext_for_carousel(),
+        text = "条件を変えて検索してみてください！\n" + QUERY_MARKS.ext_for_carousel(),
         actions=[
             {
                 "type": "uri",
@@ -1131,29 +1166,6 @@ def list_subtract(larger_list: list, smaller_list: list) -> list:
 
 
 if __name__ == "__main__":
-
-    # DBの初期設定
-    DATABASE_PATH = 'Database/sqlite_database.db' # DBのパス
-    connect = sqlite3.Connection(DATABASE_PATH)
-    db.setup_database(DATABASE_PATH)
-
-    # 格納配列の宣言 それぞれインデックスで対応。user_infos[user_id, search_query]とかで統合した方がいい・・？
-    search_queries = []
-    user_ids = []
-
-    # 検索対象の記号を設定[記号,False:スペースを削除,True:スペースを文字列に含む]
-    query_marks = [["/", False], ["+", False], ["¥", False], ["=", True]]
-
-    # グループ参加時のメッセージ設定
-    join_message = TutorialMessages.JoinMessage(query_marks)
-    # チュートリアル要求時のメッセージ設定
-    tutorial_message = TutorialMessages.TutorialMessage()
-
-    # 1回に提案する店舗数の上限
-    MAX_DISPLAY_SHOP_QUANTITY = 5
-    # 検索結果のうち、ユーザーが保持できるページ数
-    MAX_HIT_PAGE_STOCK_QUANTITY = 3
-
-    
+  
     # LINE BOT
     app.run()

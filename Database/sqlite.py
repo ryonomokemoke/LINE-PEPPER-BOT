@@ -10,9 +10,6 @@ current_directory = current_file.parent
 root_directory = current_directory.parent
 # sys.pathにルートディレクトリを追加
 sys.path.append(str(root_directory))
-# ShopRecordクラスをインポート
-from main import ShopRecord, QueryRecord
-
 
 
 ### ------------------- テーブルの初期作成 ------------------- ###
@@ -317,7 +314,7 @@ def update_query(DATABASE_PATH: str, user_id: str, input_queries: list) -> None:
     connect.close()
 
 
-def get_query_record(DATABASE_PATH: str, user_id: str) -> QueryRecord:
+def fetch_query_record_as_list(DATABASE_PATH: str, user_id: str) -> list:
     """ShopRecordインスタンスリストを作成
 
     Args:
@@ -325,7 +322,7 @@ def get_query_record(DATABASE_PATH: str, user_id: str) -> QueryRecord:
         user_id (str): _description_
 
     Returns:
-        QueryRecord: _description_
+        list: QueryRecordを作るための配列。インデックスが　date,place,price,freeword に対応
     """
     # データベースに接続
     connect = sqlite3.connect(DATABASE_PATH)
@@ -339,20 +336,20 @@ def get_query_record(DATABASE_PATH: str, user_id: str) -> QueryRecord:
     ''', (user_id,))
 
     # 取得した情報をフェッチ
-    fetched_query_record = cursor.fetchone()
+    fetched_query_record_list = cursor.fetchone()
 
     # 接続をクローズ
     cursor.close()
     connect.close()
 
-    # 取得した情報を処理する（例えば、辞書などに変換する）
-    query_record = QueryRecord()
-    query_record.date = fetched_query_record[0]
-    query_record.place = fetched_query_record[1]
-    query_record.price = fetched_query_record[2]
-    query_record.freeword = fetched_query_record[3]
+    # 取得した情報を処理する（例えば、辞書などに変換する）jump
+    # query_record = QueryRecord()
+    # query_record.date = fetched_query_record[0]
+    # query_record.place = fetched_query_record[1]
+    # query_record.price = fetched_query_record[2]
+    # query_record.freeword = fetched_query_record[3]
 
-    return query_record  # 取得した情報を返す
+    return fetched_query_record_list  # 取得した情報を返す
 
 
 
@@ -472,7 +469,7 @@ def extract_registered_shop_ids(DATABASE_PATH: str, shop_ids: list) -> list: # �
     return registered_shop_ids
 
 
-def fetch_shop_record(DATABASE_PATH: str, shop_id: str) -> ShopRecord:
+def fetch_shop_record_as_list(DATABASE_PATH: str, shop_id: str) -> list: #jump
     """DBに登録済みのShopレコードからShopRecordインスタンスを作成
 
     Args:
@@ -480,35 +477,26 @@ def fetch_shop_record(DATABASE_PATH: str, shop_id: str) -> ShopRecord:
         shop_id (str): _description_
 
     Returns:
-        ShopRecord: _description_
+        list: ShopRecordを作成するためのリスト。 インデックスに応じて、
+                shop_id, name, img_url, access, affiliate_url, review_score, review_quantity
+                を格納しています
     """
     connect = sqlite3.connect(DATABASE_PATH)
     cursor = connect.cursor()
 
     # shop_idに基づいてShopテーブルから情報を取得
     cursor.execute('SELECT * FROM Shop WHERE id = ?', (shop_id,))
-    shop_record_infos = cursor.fetchone()
+    shop_record_as_list = list(cursor.fetchone()) # タプル型をリスト型に変換
 
     # 念の為DBに未登録の場合のエラー処理
-    if shop_record_infos == []:
+    if shop_record_as_list == []:
         print("Shopテーブルからレコード情報を取得できませんでした。")
         return 
-
-    # ShopRecordインスタンス作成
-    shop_record = ShopRecord()
-    # プロパティの更新
-    shop_record.shop_id = shop_record_infos[0] # 既知だけど一応
-    shop_record.name = shop_record_infos[1]
-    shop_record.img_url = shop_record_infos[2]
-    shop_record.access = shop_record_infos[3]
-    shop_record.affiliate_url = shop_record_infos[4]
-    shop_record.review_score = shop_record_infos[5]
-    shop_record.review_quantity = shop_record_infos[6]
 
     # 接続終了
     connect.close()
     
-    return shop_record
+    return shop_record_as_list
 
 
 def upsert_shop_info(DATABASE_PATH: str, shop_id: str, shop_info: dict):
